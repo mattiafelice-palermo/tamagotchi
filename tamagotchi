@@ -1,0 +1,297 @@
+#!/bin/bash
+# Original script by OM Roscioni. Bologna, 25 June 2009
+# Revised version by M. F. Palermo, Bologna 9 nov 2015
+
+#set +o monitor
+
+#--------------------------------------------#
+#--- Detect if user has pressessed ctrl+c ---#
+#--------------------------------------------#
+
+trap ctrl_c INT
+
+function ctrl_c() {
+    pkill -9 gnuplot
+    rm -f .ndisplay_tmp
+    echo -e "Exiting Tamagotchi.\n"
+}
+
+#--- Colors
+bw="\033[1m" #BoldWhite
+ec="\033[0m" #EndColor
+bm='\e[01;35m'
+bg='\e[01;32m'
+
+tmpfile=".ndisplay_tmp"
+
+#------------------------------------------#
+#--- Print information about tamagotchi ---#
+#------------------------------------------#
+echo -e " \n ${bw}Tamagotchi${ec}: a little script to plot energies and stuff from NAMD output.\n"
+echo -e " Last revision: INSERTDATEHERE"
+
+#------------------------#
+#--- USAGE AND ERRORS ---#
+#------------------------#
+
+function usage(){
+cat << EOF
+
+Usage: tamagotchi  namd_output
+       tamagotchi  namd_output1 namd_output2 ...
+
+Display the results of a NAMD simulation with GNUplot. 
+
+EOF
+}
+
+#-------------------#
+#--- CHECK INPUT ---#
+#-------------------#
+
+input_string=$@
+
+case "$1" in
+	-h|-help|--help)
+	 usage
+	 exit 0
+	 ;;
+esac
+
+
+#--------------------------------------#
+#--- Interactive input of filenames ---#
+#--------------------------------------#
+if [ -z $1 ]; then
+    echo
+    while read -e -p " Insert filename(s) of NAMD output(s): " answer; do
+	if [ -z "$answer" ]; then
+	    echo -e "\n${bm} Error: No input file specified. Exiting Tamagotchi${ec}\n"; exit
+	else
+	    input_string="$answer"
+	    echo -e "\n Plotting files: $input_string"
+	    break
+	fi
+    done
+fi
+    
+
+for file in $input_string; do
+    if [ ! -e $file ]; then
+	echo -e "\n${bm} Warning: File \"$file\" does not exist.${ec}"
+	input_string=$(echo "$input_string" | sed "s/${file}//g")
+    else
+	lines=$(grep "ENERGY: " $file 2> /dev/null | wc -l | awk '{ print $1 }')
+	if [ $lines -gt 0 ]; then 
+	    data_present=yes
+	else
+	    echo -e "\n${bm} Warning: No data to plot present in file \"$file\" ${ec}"
+	    input_string=$(echo "$input_string" | sed "s/${file}//g")
+	fi
+    fi
+done
+
+if [ ! "$data_present" == "yes" ]; then  echo -e "\n${bm} Error: No data to plot. Exiting Tamagotchi${ec}\n"; exit;  fi
+
+
+#-----------------------------------------#
+#--- Print info about NAMD and Gnuplot ---#
+#-----------------------------------------#
+gp_version=$(gnuplot --version | awk ' { print $2 } ')
+echo -e "\n Info: Gnuplot version: $gp_version"
+
+
+# Check if all output come from the same version of namd
+i=0
+namd_mixed_versions=false
+
+for file in $input_string; do
+    nd_version[$i]=$(grep "Info: NAMD" $file | awk ' { print $3 } ')
+    if [ $i -gt 0 ] && [ "${nd_version[$i]}" != "${nd_version[$(($i-1))]}" ]; then
+	namd_mixed_versions=true
+    fi
+    ((i++))
+done
+
+
+if [ "$namd_mixed_versions" == "true" ] ; then
+    i=0
+    echo -e "\n${bm} Warning: NAMD output files from different versions ${ec}\n"
+    for file in $input_string; do
+	echo -e " File \"$file\": NAMD ${nd_version[$i]}"
+	((i++))
+    done
+else
+    echo -e " Info: NAMD version: ${nd_version[0]}"
+fi
+
+
+
+#----------------------#
+#--- GNUPLOT SCRIPT ---#
+#----------------------#
+
+function gnuplot_script {
+cat <<  EOF
+set term x11 enh persist noraise font "arial, 30"
+
+set ylabel title
+
+time=real(ts)*int(freq)
+
+sum=0
+
+filename='< grep "ENERGY:" '.files
+
+plot filename u (\$0*time/1E06):col w l title "sim. data"
+
+
+if ( real(gpv) > 4.4 ) repl filename u (\$0*time/1E06):(sum=sum + column(col), sum/(\$0+1)) title "cumulative mean" w l lw 3
+#, ''       u (\$0*time/1E06):(sum=sum + column(col), sum/(\$0+1)) title "cumulative mean" w l lw 3
+
+pause 5
+
+reread
+
+EOF
+}
+
+#----------------------#
+#--- MISC FUNCTIONS ---#
+#----------------------#
+function kill_gnuplot {
+    pkill -9 "gnuplot" 
+    pkill -9 "gnuplot_x11" 
+    killall -9 "gnuplot_x11" 
+    killall -9 "gnuplot" 
+}
+
+function clearLastLine {
+    tput cuu1 && tput el
+}
+
+# Temporary solution, to be improved
+file_arr=($input_string)
+
+etitles=$(grep "ETITLE" ${file_arr[0]} | tail -1)
+files=$input_string
+freq=$(grep "ENERGY OUTPUT STEPS" ${file_arr[0]} | awk '{ print $5 }')
+ts=$(grep "Info: TIMESTEP" ${file_arr[0]} | awk '{ print $3 }')
+
+etitles=${etitles:15} # cuts away the "ETITLE: TS " part
+
+#---------------------------------------------#
+#--- Associate alphabet letter with option ---#
+#---------------------------------------------#
+
+etitles_num=$(wc -w <<< "$etitles") # number of words in string
+etitles_arr=($etitles) # create array from string
+alphabet='a b c d e f g h i j k l m n o p q r s t u v w x y z'
+letters=($alphabet)
+
+function lett_to_num {
+    local counter=0
+
+    for letter in $alphabet; do
+	if [ $letter != $1 ]; then ((counter++)); else break; fi
+    done
+
+    echo $counter	
+}
+
+#--- Create temporary gnuplot file
+gnuplot_script > $tmpfile
+
+
+
+#------------------------------------#
+#--- Print two-column choice menu ---#
+#------------------------------------#
+
+echo -e " \n Select plot by pressing the corresponding letter:\n"
+
+counter=0
+string=""
+
+#--- This is the only way I found to print a menu on two columns
+while [ $counter -lt $etitles_num ]; do
+    if [ ! -z ${etitles_arr[$counter]} ]; then
+	string1=" ${bw}${letters[$counter]}.${ec} ${etitles_arr[$counter]}"
+    fi
+    if [ ! -z ${etitles_arr[$(($counter+1))]} ]; then
+	string2="${bw}${letters[$(($counter+1))]}.${ec} ${etitles_arr[$(($counter+1))]}"
+    else
+	string2=""
+    fi
+    string="$string$string1 $string2\n"
+
+    let counter=$counter+2
+done
+
+echo -e "$string" | column -t -n # lets use column to clean a bit
+
+#--- Commands help
+echo -e " \n [${bw}<-${ec}] Previous plot; [${bw}->${ec}] Next plot; [${bw}Enter${ec}] exit\n"
+
+
+#--- Read user input
+let columns=$etitles_num+2
+column=2
+
+while IFS= read -r -s -n1  answer; do
+    # If the first character is an escape (\x1b) check for arrow and enter keypress
+    if [ "$answer" == $'\x1b' ]; then
+	while IFS= read -r -s -n2 rest; do
+	    answer+="$rest"
+	    break
+	done
+    fi
+
+    if    [ "$answer" == $'\x1b[C' ]; then 
+	if [ ! $column -ge $columns ]; then 
+	    ((column++))
+	    title=${etitles_arr[$(($column-3))]}
+	    kill_gnuplot 2> /dev/null
+	    clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title"
+	    gnuplot -e "files='${files}'; title='${title}'; freq='${freq}'; ts='${ts}'; col=${column};gpv=${gp_version}" $tmpfile 2> /dev/null &
+	fi
+
+    elif  [ "$answer" == $'\x1b[D' ]; then 
+	if [ ! $column -le 3 ]; then 
+	    let column=$column-1
+	    kill_gnuplot 2> /dev/null
+	    title=${etitles_arr[$(($column-3))]}
+	    clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title"
+	    gnuplot -e "files='${files}'; title='${title}'; freq='${freq}'; ts='${ts}'; col=${column};gpv=${gp_version}" $tmpfile 2> /dev/null &
+	else
+	    column=3
+	fi
+
+    elif [ "$answer" == $'\x1b[A' ]; then
+	continue
+    elif [ "$answer" == $'\x1b[B' ]; then 
+	continue
+    elif  [ "$answer" == $"" ]; then 
+	echo -e "\n Exiting Tamagotchi.\n"
+	kill_gnuplot 2> /dev/null
+	rm -f $tmpfile
+	exit
+    else
+	if [[ "$alphabet" == *$answer* ]]; then
+	    index=$(lett_to_num $answer)
+	    title=${etitles_arr[$index]}
+	    if [ ! -z $title ]; then
+		let column=$index+3
+		kill_gnuplot 2> /dev/null
+		clearLastLine; echo -e "  $answer: $title"
+		gnuplot -e "files='${files}'; title='${title}'; freq='${freq}'; ts='${ts}'; col=${column};gpv=${gp_version}" $tmpfile 2> /dev/null &
+	    else
+		clearLastLine; echo -e " Option '$answer' not found. Try with another letter."
+	    fi
+	fi
+    fi
+done
+
+rm -f $tmpfile
+
+exit
