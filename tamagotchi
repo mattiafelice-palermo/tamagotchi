@@ -19,16 +19,14 @@ function ctrl_c() {
 #--- Colors
 bw="\033[1m" #BoldWhite
 ec="\033[0m" #EndColor
-bm='\e[01;35m'
-bg='\e[01;32m'
+bm='\e[01;35m' #BoldMagenta - for error messages
+bg='\e[01;32m' #BoldGreen - for success messages
 
 tmpfile=".ndisplay_tmp"
 
-#------------------------------------------#
-#--- Print information about tamagotchi ---#
-#------------------------------------------#
-echo -e " \n ${bw}Tamagotchi${ec}: a little script to plot energies and stuff from NAMD output.\n"
-echo -e " Last revision: INSERTDATEHERE"
+rm -f $tmpfile
+
+mkfifo $tmpfile
 
 #------------------------#
 #--- USAGE AND ERRORS ---#
@@ -37,10 +35,19 @@ echo -e " Last revision: INSERTDATEHERE"
 function usage(){
 cat << EOF
 
-Usage: tamagotchi  namd_output
-       tamagotchi  namd_output1 namd_output2 ...
+ usage: $0 [-h] [-r refresh_freq] namd_output1.out namd_output2.out ...
 
-Display the results of a NAMD simulation with GNUplot. 
+ Display the results of a NAMD simulation with GNUplot. 
+
+ Options:
+   -r=refresh_frequency
+      Refresh the plot at the user specified time interval. refres_frequency must be specified 
+      in seconds and can be either an integer or real number. If no refresh frequency is specified, 
+      10 seconds is the default value. If value is string "none", plot will not be refreshed.
+
+   -h Displays this help and exits
+
+ Last revision: INSERTDATEHERE"
 
 EOF
 }
@@ -51,13 +58,53 @@ EOF
 
 input_string=$@
 
-case "$1" in
-	-h|-help|--help)
-	 usage
-	 exit 0
-	 ;;
-esac
+timeout=10
 
+while getopts ":r:h" opt; do
+    case $opt in
+	h) usage
+	    exit 0
+	    ;;
+	r) timeout=$OPTARG
+	    ;;
+	    
+	\?)
+	    echo -e "\n ${bm}Invalid option: -$OPTARG\n${ec}" >&2
+	    exit 1
+	    ;;
+	:)
+	    echo -e "\n ${bm}Option -$OPTARG requires an argument.\n${ec}" >&2
+	    exit 1
+	    ;;
+    esac
+done
+
+shift $(($OPTIND -1))
+
+
+#------------------------------------------#
+#--- Print information about tamagotchi ---#
+#------------------------------------------#
+echo -e " \n ${bw}Tamagotchi${ec}: a little script to plot energies and stuff from NAMD output.\n"
+echo -e " Last revision: INSERTDATEHERE"
+
+
+#------------------------#
+#--- Check user input ---#
+#------------------------#
+
+timeout_check=$(echo "$timeout/1." | bc -l 2> /dev/null )
+
+if [ "$timeout" == "none" ]; then
+    timeout_opt=""
+elif [ "$timeout_check" == "0" -o "$timeout_check" == "" ]; then
+    echo -e "\n ${bm}Refresh value '$timeout' is not a real or an integer.\n${ec}"
+    exit
+else
+    timeout_opt="-t $timeout"
+fi
+
+input_string=$@
 
 #--------------------------------------#
 #--- Interactive input of filenames ---#
@@ -125,7 +172,7 @@ else
     echo -e " Info: NAMD version: ${nd_version[0]}"
 fi
 
-
+echo -e "\n Refresh frequency is: $timeout seconds" 
 
 #----------------------#
 #--- GNUPLOT SCRIPT ---#
@@ -134,6 +181,13 @@ fi
 function gnuplot_script {
 cat <<  EOF
 set term x11 enh persist noraise font "arial, 30"
+
+title="$title"
+ts=$ts
+freq=$freq
+files="$files"
+col=$column
+gpv=$gp_version
 
 set ylabel title
 
@@ -145,13 +199,15 @@ filename='< grep "ENERGY:" '.files
 
 plot filename u (\$0*time/1E06):col w l title "sim. data"
 
+#xmin=GPVAL_X_MIN
+#xmax=GPVAL_X_MAX
+#ymin=GPVAL_Y_MIN
+#ymax=GPVAL_Y_MAX
+#
+#set xrange[xmin:xmax]
+#set yrange[ymin:ymax]
 
 if ( real(gpv) > 4.4 ) repl filename u (\$0*time/1E06):(sum=sum + column(col), sum/(\$0+1)) title "cumulative mean" w l lw 3
-#, ''       u (\$0*time/1E06):(sum=sum + column(col), sum/(\$0+1)) title "cumulative mean" w l lw 3
-
-pause 5
-
-reread
 
 EOF
 }
@@ -199,10 +255,6 @@ function lett_to_num {
     echo $counter	
 }
 
-#--- Create temporary gnuplot file
-gnuplot_script > $tmpfile
-
-
 
 #------------------------------------#
 #--- Print two-column choice menu ---#
@@ -231,66 +283,85 @@ done
 echo -e "$string" | column -t -n # lets use column to clean a bit
 
 #--- Commands help
-echo -e " \n [${bw}<-${ec}] Previous plot; [${bw}->${ec}] Next plot; [${bw}Enter${ec}] exit\n"
+echo -e " \n [${bw}<-${ec}] Previous plot; [${bw}->${ec}] Next plot; [${bw}Spacebar${ec}] Refresh; [${bw}Enter${ec}] Exit\n"
 
 
 #--- Read user input
 let columns=$etitles_num+2
 column=2
 
-while IFS= read -r -s -n1  answer; do
-    # If the first character is an escape (\x1b) check for arrow and enter keypress
-    if [ "$answer" == $'\x1b' ]; then
-	while IFS= read -r -s -n2 rest; do
-	    answer+="$rest"
-	    break
-	done
+#--- Thanks to Jon Gjengset for the useful hint on his blog!
+#--- https://jonhoo.wordpress.com/2014/01/29/incremental-plotting-in-gnuplot/
+
+gnuplot -p <$tmpfile 2> .tamagotchi.err & exec 3>$tmpfile
+
+while :
+do
+    if [ "$title" != "" ]; then
+	date=$(date)
+	clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title !Last refresh on $date"
+	gnuplot_script >&3
     fi
 
-    if    [ "$answer" == $'\x1b[C' ]; then 
-	if [ ! $column -ge $columns ]; then 
-	    ((column++))
-	    title=${etitles_arr[$(($column-3))]}
-	    kill_gnuplot 2> /dev/null
-	    clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title"
-	    gnuplot -e "files='${files}'; title='${title}'; freq='${freq}'; ts='${ts}'; col=${column};gpv=${gp_version}" $tmpfile 2> /dev/null &
+    while IFS= read  -r $timeout_opt -s -n1 answer; do
+	# If the first character is an escape (\x1b) check for arrow and enter keypress
+	if [ "$answer" == $'\x1b' ]; then
+	    while IFS= read -r -s -n2 rest; do
+		answer+="$rest"
+		break
+	    done
 	fi
-
-    elif  [ "$answer" == $'\x1b[D' ]; then 
-	if [ ! $column -le 3 ]; then 
-	    let column=$column-1
-	    kill_gnuplot 2> /dev/null
-	    title=${etitles_arr[$(($column-3))]}
-	    clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title"
-	    gnuplot -e "files='${files}'; title='${title}'; freq='${freq}'; ts='${ts}'; col=${column};gpv=${gp_version}" $tmpfile 2> /dev/null &
-	else
-	    column=3
-	fi
-
-    elif [ "$answer" == $'\x1b[A' ]; then
-	continue
-    elif [ "$answer" == $'\x1b[B' ]; then 
-	continue
-    elif  [ "$answer" == $"" ]; then 
-	echo -e "\n Exiting Tamagotchi.\n"
-	kill_gnuplot 2> /dev/null
-	rm -f $tmpfile
-	exit
-    else
-	if [[ "$alphabet" == *$answer* ]]; then
-	    index=$(lett_to_num $answer)
-	    title=${etitles_arr[$index]}
-	    if [ ! -z $title ]; then
-		let column=$index+3
-		kill_gnuplot 2> /dev/null
-		clearLastLine; echo -e "  $answer: $title"
-		gnuplot -e "files='${files}'; title='${title}'; freq='${freq}'; ts='${ts}'; col=${column};gpv=${gp_version}" $tmpfile 2> /dev/null &
+	
+	if    [ "$answer" == $'\x1b[C' ]; then 
+	    if [ ! $column -ge $columns ]; then 
+		((column++))
+		title=${etitles_arr[$(($column-3))]}
+		clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title"
+		gnuplot_script >&3
+	    fi
+	    
+	elif  [ "$answer" == $'\x1b[D' ]; then 
+	    if [ ! $column -le 3 ]; then 
+		let column=$column-1
+		title=${etitles_arr[$(($column-3))]}
+		clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title"
+		gnuplot_script >&3
 	    else
-		clearLastLine; echo -e " Option '$answer' not found. Try with another letter."
+		column=3
+	    fi
+	    
+	elif [ "$answer" == $'\x1b[A' ]; then
+	    continue
+	elif [ "$answer" == $'\x1b[B' ]; then 
+	    continue
+	elif [ "$answer" == $'\x20' ]; then
+	    date=$(date)
+	    clearLastLine; echo -e "  ${letters[$(($column-3))]}: $title !Last refresh on $date"
+	    gnuplot_script >&3
+	elif  [ "$answer" == $"" ]; then 
+	    echo -e "\n Exiting Tamagotchi.\n"
+	    kill_gnuplot 2> /dev/null
+	    rm -f $tmpfile
+	    exit
+	else
+	    if [[ "$alphabet" == *$answer* ]]; then
+		index=$(lett_to_num $answer)
+		title=${etitles_arr[$index]}
+		if [ ! -z $title ]; then
+		    let column=$index+3
+		    clearLastLine; echo -e "  $answer: $title"
+		    gnuplot_script >&3
+		else
+		    clearLastLine; echo -e " Option '$answer' not found. Try with another letter."
+		fi
 	    fi
 	fi
-    fi
+	
+    done
+
 done
+
+exec 3>&-
 
 rm -f $tmpfile
 
