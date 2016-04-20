@@ -124,14 +124,14 @@ fi
 for file in $input_string; do
     if [ ! -e $file ]; then
 	echo -e "\n${bm} Warning: File \"$file\" does not exist.${ec}"
-	input_string=$(echo "$input_string" | sed "s/${file}//g")
+	input_string=$(echo "$input_string" | sed "s|${file}||g")
     else
 	lines=$(grep "ENERGY: " $file 2> /dev/null | wc -l | awk '{ print $1 }')
 	if [ $lines -gt 0 ]; then 
 	    data_present=yes
 	else
 	    echo -e "\n${bm} Warning: No data to plot present in file \"$file\" ${ec}"
-	    input_string=$(echo "$input_string" | sed "s/${file}//g")
+	    input_string=$(echo "$input_string" | sed "s|${file}||g")
 	fi
     fi
 done
@@ -193,7 +193,7 @@ time=real(ts)*int(freq)
 
 sum=0
 
-filename='< grep "ENERGY:" '.files
+filename='< grep ^ENERGY: '.files
 
 plot filename u (\$0*time/1E06):col w l title "sim. data"
 
